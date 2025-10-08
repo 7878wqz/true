@@ -1,0 +1,78 @@
+export default {
+  async fetch(request, env) {
+    // ป้องกันผู้เรียกไม่พึงประสงค์ ด้วย secret header
+    const SECRET = env.WORKER_SECRET; // ตั้งค่าใน Cloudflare Secrets (wrangler secret หรือ Dashboard)
+    const auth = request.headers.get("x-auth-token");
+    if (!auth || auth !== SECRET) {
+      return new Response(JSON.stringify({ error: "Unauthorized" }), {
+        status: 401,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    // อ่าน body ที่รับมาจากบอท (JSON)
+    let payload;
+    try {
+      payload = await request.json(); // คาดว่า body เป็น JSON { "voucher": "...", "phone": "..." }
+    } catch (e) {
+      return new Response(JSON.stringify({ error: "Invalid JSON" }), {
+        status: 400,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    const voucher = payload.voucher;
+    const phone = payload.phone;
+    if (!voucher || !phone) {
+      return new Response(JSON.stringify({ error: "Missing voucher or phone" }), {
+        status: 400,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    // ส่ง POST ไป TrueMoney
+    const tmUrl =
+      `https://gift.truemoney.com/campaign/vouchers/${encodeURIComponent(voucher)}/redeem`;
+
+    // headers เลียนแบบ browser
+    const tmHeaders = {
+      "Accept": "application/json, text/javascript, */*; q=0.01",
+      "Content-Type": "application/json",
+      "Origin": "https://gift.truemoney.com",
+      "Referer": "https://gift.truemoney.com/",
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      // เพิ่ม header อื่น ๆ ถ้าต้องการ
+    };
+
+    try {
+      const tmResp = await fetch(tmUrl, {
+        method: "POST",
+        headers: tmHeaders,
+        body: JSON.stringify({ mobile: phone, voucher_hash: voucher }),
+      });
+
+      // ถ้าตอบ JSON ให้ส่งกลับเป็น JSON
+      const text = await tmResp.text();
+      // พยายาม parse JSON หากเป็นไปได้
+      try {
+        const data = JSON.parse(text);
+        return new Response(JSON.stringify({ status: tmResp.status, data }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      } catch (e) {
+        // ถ้าไม่ใช่ JSON (เช่น HTML ถูกบล็อก) ส่ง raw text กลับ (truncate เพื่อความปลอดภัย)
+        const snippet = text.slice(0, 2000); // limit ขนาด
+        return new Response(JSON.stringify({ status: tmResp.status, raw: snippet }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+    } catch (err) {
+      return new Response(JSON.stringify({ error: "Fetch to TrueMoney failed", detail: err.toString() }), {
+        status: 502,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+  }
+};
